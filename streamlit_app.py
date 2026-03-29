@@ -62,7 +62,6 @@ with st.form("form_inserimento", clear_on_submit=True):
 # --- LOGICA SALVATAGGIO ---
 if submit:
     try:
-        # Legge dati freschi
         df_attuale = conn.read(ttl=0)
         
         nuovo_record = pd.DataFrame([{
@@ -87,7 +86,7 @@ if submit:
 
 st.divider()
 
-# --- ESPORTAZIONE PDF (LOGICA RINFORZATA) ---
+# --- ESPORTAZIONE PDF (VERSIONE DEFINITIVA) ---
 st.subheader("🖨️ Esporta Report PDF")
 cx, cy = st.columns(2)
 d_start = cx.date_input("Dal", datetime.now())
@@ -97,33 +96,21 @@ if st.button("📄 GENERA PDF"):
     try:
         df_raw = conn.read(ttl=0)
         
-        # 1. Normalizzazione: Trasforma tutto in stringa e rimuovi spazi
-        df_raw['Data'] = df_raw['Data'].astype(str).str.strip()
+        # TRUCCO PER IL FORMATO: Trasformiamo la colonna Data in formato data Python reale
+        # dayfirst=True istruisce Pandas a leggere correttamente il formato 29/03/2026
+        df_raw['date_objects'] = pd.to_datetime(df_raw['Data'], dayfirst=True, errors='coerce').dt.date
         
-        # 2. Funzione di parsing multi-formato
-        def robust_date_parser(date_str):
-            for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
-                try:
-                    # Rimuove eventuali parti orarie se presenti
-                    clean_str = date_str.split(' ')[0]
-                    return datetime.strptime(clean_str, fmt).date()
-                except (ValueError, IndexError):
-                    continue
-            return None
-
-        # 3. Creazione colonna temporanea per il filtro
-        df_raw['date_objects'] = df_raw['Data'].apply(robust_date_parser)
-        
-        # 4. Filtro
+        # Filtro
         df_filtrato = df_raw[
             (df_raw['date_objects'] >= d_start) & 
             (df_raw['date_objects'] <= d_end)
         ].copy()
 
         if df_filtrato.empty:
-            st.warning(f"Nessun dato trovato tra il {d_start.strftime('%d/%m/%Y')} e il {d_end.strftime('%d/%m/%Y')}. Verifica il formato nel foglio.")
+            st.warning(f"Nessun dato trovato tra il {d_start} e il {d_end}.")
+            st.write("Dati attualmente presenti nel foglio (prime 3 righe):")
+            st.dataframe(df_raw[['Data']].head(3)) # Ti aiuta a capire cosa vede il codice
         else:
-            # Rimuove la colonna tecnica e genera il PDF
             df_final_pdf = df_filtrato.drop(columns=['date_objects']).astype(str)
             
             pdf_path = "Report_Salute.pdf"
