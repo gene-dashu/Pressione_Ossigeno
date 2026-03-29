@@ -8,14 +8,19 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 
-# --- CONFIGURAZIONE PAGINA ---
-st.set_page_config(page_title="Monitor Salute", layout="centered")
+# --- CONFIGURAZIONE ---
+st.set_page_config(page_title="Monitor Salute", layout="wide")
+
+giorni_it = {
+    "Monday": "Lunedì", "Tuesday": "Martedì", "Wednesday": "Mercoledì",
+    "Thursday": "Giovedì", "Friday": "Venerdì", "Saturday": "Sabato", "Sunday": "Domenica"
+}
 
 # --- PROTEZIONE PASSWORD ---
 def check_password():
     if "password_correct" not in st.session_state:
         st.title("🔐 Accesso Protetto")
-        pwd = st.text_input("Inserisci la password", type="password")
+        pwd = st.text_input("Inserisci Password", type="password")
         if st.button("Accedi"):
             if pwd == st.secrets["passwords"]["access_password"]:
                 st.session_state["password_correct"] = True
@@ -28,10 +33,9 @@ def check_password():
 if not check_password():
     st.stop()
 
-# --- CONNESSIONE GOOGLE SHEETS ---
+# --- CONNESSIONE ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- FUNZIONE INPUT (CAMPO VUOTO + CHECKBOX N/D) ---
 def salute_input(label, key):
     col_text, col_nd = st.columns([3, 1])
     with col_text:
@@ -59,12 +63,13 @@ with st.form("form_inserimento", clear_on_submit=True):
 
     submit = st.form_submit_button("💾 SALVA NUOVA RIGA")
 
-# --- LOGICA SALVATAGGIO ---
 if submit:
     try:
         df_attuale = conn.read(ttl=0)
+        nome_giorno_it = giorni_it.get(data_ins.strftime("%A"), data_ins.strftime("%A"))
         
         nuovo_record = pd.DataFrame([{
+            "Giorno": nome_giorno_it,
             "Data": data_ins.strftime("%d/%m/%Y"),
             "Ora": ora_ins.strftime("%H:%M"),
             "Saturazione": sat if sat != "" else "N/D",
@@ -77,8 +82,7 @@ if submit:
         
         df_finale = pd.concat([df_attuale, nuovo_record], ignore_index=True)
         conn.update(data=df_finale)
-        
-        st.success("✅ Riga aggiunta!")
+        st.success(f"✅ Riga aggiunta!")
         time.sleep(1)
         st.rerun()
     except Exception as e:
@@ -86,7 +90,7 @@ if submit:
 
 st.divider()
 
-# --- ESPORTAZIONE PDF (VERSIONE DEFINITIVA) ---
+# --- ESPORTAZIONE PDF (LOGICA SCAN COMPLETO) ---
 st.subheader("🖨️ Esporta Report PDF")
 cx, cy = st.columns(2)
 d_start = cx.date_input("Dal", datetime.now())
@@ -94,46 +98,61 @@ d_end = cy.date_input("Al", datetime.now())
 
 if st.button("📄 GENERA PDF"):
     try:
-        df_raw = conn.read(ttl=0)
+        # Leggiamo tutto e forziamo a stringa
+        df_raw = conn.read(ttl=0).astype(str)
         
-        # TRUCCO PER IL FORMATO: Trasformiamo la colonna Data in formato data Python reale
-        # dayfirst=True istruisce Pandas a leggere correttamente il formato 29/03/2026
-        df_raw['date_objects'] = pd.to_datetime(df_raw['Data'], dayfirst=True, errors='coerce').dt.date
+        righe_filtrate = []
         
-        # Filtro
-        df_filtrato = df_raw[
-            (df_raw['date_objects'] >= d_start) & 
-            (df_raw['date_objects'] <= d_end)
-        ].copy()
+        # Scansione riga per riga per non saltare nulla
+        for index, row in df_raw.iterrows():
+            data_str = row['Data'].split()[0] # Prende solo la parte data
+            try:
+                # Prova i due formati possibili
+                current_date = None
+                for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+                    try:
+                        current_date = datetime.strptime(data_str, fmt).date()
+                        break
+                    except:
+                        continue
+                
+                if current_date and d_start <= current_date <= d_end:
+                    righe_filtrate.append(row)
+            except:
+                continue
 
-        if df_filtrato.empty:
-            st.warning(f"Nessun dato trovato tra il {d_start} e il {d_end}.")
-            st.write("Dati attualmente presenti nel foglio (prime 3 righe):")
-            st.dataframe(df_raw[['Data']].head(3)) # Ti aiuta a capire cosa vede il codice
+        if not righe_filtrate:
+            st.warning("Nessun dato trovato per questo intervallo.")
         else:
-            df_final_pdf = df_filtrato.drop(columns=['date_objects']).astype(str)
+            df_final_pdf = pd.DataFrame(righe_filtrate)
+            # Rimuoviamo eventuali colonne extra create da Streamlit/Pandas
+            df_final_pdf = df_final_pdf[["Giorno", "Data", "Ora", "Saturazione", "Battiti con saturimetro", "Max", "Min", "Battiti con misuratore pressione", "Note"]]
             
             pdf_path = "Report_Salute.pdf"
-            doc = SimpleDocTemplate(pdf_path, pagesize=A4)
+            doc = SimpleDocTemplate(pdf_path, pagesize=A4, rightMargin=15, leftMargin=15, topMargin=20, bottomMargin=20)
             elements = []
             styles = getSampleStyleSheet()
             
             elements.append(Paragraph("DIARIO PARAMETRI SALUTE", styles['Title']))
+            elements.append(Paragraph(f"Periodo: {d_start.strftime('%d/%m/%Y')} - {d_end.strftime('%d/%m/%Y')}", styles['Normal']))
             elements.append(Spacer(1, 12))
             
+            # Trasformiamo in lista per ReportLab
             data_list = [df_final_pdf.columns.tolist()] + df_final_pdf.values.tolist()
-            t = Table(data_list)
+            
+            t = Table(data_list, repeatRows=1)
             t.setStyle(TableStyle([
                 ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
                 ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
                 ('FONTSIZE', (0, 0), (-1, -1), 7),
             ]))
             elements.append(t)
             doc.build(elements)
             
             with open(pdf_path, "rb") as f:
-                st.download_button("📥 Scarica PDF", f, file_name="Report_Salute.pdf")
+                st.download_button("📥 Scarica PDF", f, file_name=f"Report_{d_start}.pdf")
                 
     except Exception as e:
         st.error(f"Errore critico PDF: {e}")
