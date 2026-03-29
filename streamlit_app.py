@@ -4,7 +4,7 @@ import pandas as pd
 from datetime import datetime
 import time
 from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 
@@ -14,9 +14,9 @@ st.set_page_config(page_title="Monitor Salute", layout="centered")
 # --- PROTEZIONE PASSWORD ---
 def check_password():
     if "password_correct" not in st.session_state:
-        st.title("Accesso Protetto")
-        pwd = st.text_input("Inserisci Password", type="password")
-        if st.button("Entra"):
+        st.title("🔐 Accesso Protetto")
+        pwd = st.text_input("Inserisci la password per continuare", type="password")
+        if st.button("Accedi"):
             if pwd == st.secrets["passwords"]["access_password"]:
                 st.session_state["password_correct"] = True
                 st.rerun()
@@ -28,39 +28,41 @@ def check_password():
 if not check_password():
     st.stop()
 
-# --- CONNESSIONE ---
+# --- CONNESSIONE GOOGLE SHEETS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- FUNZIONE PER INPUT PERSONALIZZATO (NUMERO O N/D) ---
-def salute_input(label):
-    col_a, col_b = st.columns([3, 1])
-    with col_a:
-        val = st.text_input(f"{label}", value="", placeholder="Inserisci valore...")
-    with col_b:
-        nd = st.checkbox("N/D", key=f"nd_{label}")
-    return "N/D" if nd else val
+# --- FUNZIONE INPUT (CAMPO VUOTO + CHECKBOX N/D) ---
+def salute_input(label, key):
+    col_text, col_nd = st.columns([3, 1])
+    with col_text:
+        valore = st.text_input(label, value="", placeholder="Inserisci valore...", key=f"txt_{key}")
+    with col_nd:
+        st.write(" ") # Allineamento estetico
+        nd = st.checkbox("N/D", key=f"chk_{key}")
+    return "N/D" if nd else valore
 
-# --- INTERFACCIA ---
-st.title("🩺 Registro Parametri Salute")
+# --- INTERFACCIA DI INSERIMENTO ---
+st.title("🩺 Registro Pressione e Ossigeno")
+st.info("Nota: Lo script aggiunge solo nuove righe. Per modifiche o cancellazioni, agire direttamente sul Foglio Google.")
 
 with st.form("form_inserimento", clear_on_submit=True):
-    col1, col2 = st.columns(2)
+    c1, c2 = st.columns(2)
     
-    with col1:
-        data_ins = st.date_input("Data", datetime.now())
-        sat = salute_input("Saturazione %")
-        max_p = salute_input("Pressione MAX")
-        bpm_p = salute_input("BPM (Pressione)")
+    with c1:
+        data_ins = st.date_input("Data misurazione", datetime.now())
+        sat = salute_input("Saturazione %", "sat")
+        max_p = salute_input("Pressione MAX", "max")
+        bpm_p = salute_input("BPM (Misuratore Pressione)", "bpm_p")
         
-    with col2:
-        ora_ins = st.time_input("Ora", datetime.now().time())
-        bpm_s = salute_input("BPM (Saturimetro)")
-        min_p = salute_input("Pressione MIN")
-        note = st.text_area("Note", value="")
+    with c2:
+        ora_ins = st.time_input("Ora misurazione", datetime.now().time())
+        bpm_s = salute_input("BPM (Saturimetro)", "bpm_s")
+        min_p = salute_input("Pressione MIN", "min")
+        note = st.text_area("Note", value="", placeholder="Eventuali annotazioni...")
 
-    submit = st.form_submit_button("Salva nel Foglio e Formatta")
+    submit = st.form_submit_button("💾 AGGIUNGI RIGA AL FOGLIO")
 
-# --- LOGICA SALVATAGGIO ---
+# --- LOGICA SALVATAGGIO (SOLO APPEND) ---
 if submit:
     nuovo_record = pd.DataFrame([{
         "Data": data_ins.strftime("%d/%m/%Y"),
@@ -74,57 +76,65 @@ if submit:
     }])
     
     try:
-        df_esistente = conn.read()
-        df_aggiornato = pd.concat([df_esistente, nuovo_record], ignore_index=True)
-        
-        # Update con formattazione (i bordi vengono mantenuti se impostati nel foglio master)
-        conn.update(data=df_aggiornato)
-        
-        st.success("✅ Dati salvati! Ricordati di impostare i bordi su Google Sheets 'Formato > Bordi' per la griglia automatica.")
-        time.sleep(1)
+        # Il metodo .create aggiunge i dati in coda senza sovrascrivere l'esistente
+        conn.create(data=nuovo_record)
+        st.success("✅ Riga aggiunta correttamente in fondo al foglio!")
+        time.sleep(1.5)
         st.rerun()
     except Exception as e:
-        st.error(f"Errore: {e}")
+        st.error(f"Errore nel salvataggio: {e}")
 
 st.divider()
 
 # --- ESPORTAZIONE PDF ---
-st.subheader("🖨️ Genera Report PDF Stampabile")
-c1, c2 = st.columns(2)
-d_inizio = c1.date_input("Inizio", datetime.now())
-d_fine = c2.date_input("Fine", datetime.now())
+st.subheader("🖨️ Esporta Report Stampabile")
+cx, cy = st.columns(2)
+d_start = cx.date_input("Data Inizio", datetime.now())
+d_end = cy.date_input("Data Fine", datetime.now())
 
-if st.button("Scarica Report PDF"):
+if st.button("📄 GENERA PDF"):
     try:
-        df_totale = conn.read()
-        df_totale['tmp_date'] = pd.to_datetime(df_totale['Data'], format="%d/%m/%Y", errors='coerce').dt.date
-        df_filtrato = df_totale.dropna(subset=['tmp_date'])
-        mask = (df_filtrato['tmp_date'] >= d_inizio) & (df_filtrato['tmp_date'] <= d_fine)
-        df_finale = df_filtrato.loc[mask].drop(columns=['tmp_date']).astype(str)
+        # La lettura serve solo per generare il PDF locale, non scrive nulla
+        df_raw = conn.read()
         
-        if df_finale.empty:
-            st.warning("Nessun dato nel range selezionato.")
+        # Conversione sicura per confronto date
+        df_raw['tmp_dt'] = pd.to_datetime(df_raw['Data'], format="%d/%m/%Y", errors='coerce').dt.date
+        df_clean = df_raw.dropna(subset=['tmp_dt'])
+        
+        # Filtro range
+        mask = (df_clean['tmp_dt'] >= d_start) & (df_clean['tmp_dt'] <= d_end)
+        df_final = df_clean.loc[mask].drop(columns=['tmp_dt']).astype(str)
+        
+        if df_final.empty:
+            st.warning("Nessun dato trovato per il periodo selezionato.")
         else:
-            pdf_path = "report.pdf"
-            doc = SimpleDocTemplate(pdf_path, pagesize=A4, rightMargin=20, leftMargin=20, topMargin=20, bottomMargin=20)
+            pdf_name = "Report_Salute.pdf"
+            doc = SimpleDocTemplate(pdf_name, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+            elements = []
             styles = getSampleStyleSheet()
-            elementi = [Paragraph(f"DIARIO PRESSIONE E OSSIGENO ({d_inizio} / {d_fine})", styles['Title'])]
             
-            # Tabella PDF con griglia pesante
-            tab_data = [df_finale.columns.tolist()] + df_finale.values.tolist()
-            tabella = Table(tab_data)
-            tabella.setStyle(TableStyle([
-                ('GRID', (0, 0), (-1, -1), 1, colors.black), # Griglia per PDF
+            elements.append(Paragraph("DIARIO PARAMETRI SALUTE", styles['Title']))
+            elements.append(Paragraph(f"Periodo: {d_start.strftime('%d/%m/%Y')} - {d_end.strftime('%d/%m/%Y')}", styles['Normal']))
+            elements.append(Spacer(1, 12))
+            
+            # Tabella con bordi per PDF
+            data_list = [df_final.columns.tolist()] + df_final.values.tolist()
+            t = Table(data_list)
+            t.setStyle(TableStyle([
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
                 ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
                 ('FONTSIZE', (0, 0), (-1, -1), 8),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+                ('TOPPADDING', (0, 0), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
             ]))
             
-            elementi.append(tabella)
-            doc.build(elementi)
+            elements.append(t)
+            doc.build(elements)
             
-            with open(pdf_path, "rb") as f:
-                st.download_button("Scarica PDF", f, file_name=f"Report_Salute.pdf")
+            with open(pdf_name, "rb") as f:
+                st.download_button("📥 Scarica il file PDF", f, file_name=f"Report_{d_start.strftime('%d_%m')}.pdf")
+                
     except Exception as e:
-        st.error(f"Errore PDF: {e}")
+        st.error(f"Errore generazione PDF: {e}")
